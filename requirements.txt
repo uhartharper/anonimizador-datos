@@ -1,0 +1,17 @@
+# Anonimizador multi-jurisdiccional — dependencias
+presidio-analyzer>=2.2.0
+presidio-anonymizer>=2.2.0
+spacy>=3.7.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+python-docx>=1.1.0
+langdetect>=1.0.9
+
+# Modelos de spaCy — instalar manualmente según idiomas necesarios:
+# python -m spacy download es_core_news_lg   (español — mínimo requerido)
+# python -m spacy download en_core_web_lg    (inglés — UK GDPR, CCPA)
+# python -m spacy download pt_core_news_lg   (portugués — LGPD Brasil)
+# python -m spacy download fr_core_news_lg   (francés)
+# python -m spacy download de_core_news_lg   (alemán)
+# python -m spacy download it_core_news_lg   (italiano)
+# python -m spacy download nl_core_news_lg   (neerlandés)

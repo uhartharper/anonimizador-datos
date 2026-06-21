@@ -1,0 +1,5 @@
+entrada/
+salida/
+__pycache__/
+*.pyc
+.env
