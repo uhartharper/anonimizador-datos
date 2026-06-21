@@ -1,5 +1,5 @@
 # =============================================================================
-# anonimizar.py — Anonimizador multi-jurisdiccional v2.0
+# anonimizar.py — Anonimizador multi-jurisdiccional v2.1
 #
 # Jurisdicciones soportadas:
 #   rgpd      — UE (RGPD/GDPR 2016/679)
@@ -13,14 +13,15 @@
 #   todo      — Activa todas las jurisdicciones simultáneamente
 #
 # Uso:
-#   python anonimizar.py                     → aplica RGPD (por defecto)
-#   python anonimizar.py --ley chile         → aplica Ley 21.719 chilena
-#   python anonimizar.py --ley rgpd chile    → RGPD + Ley 21.719
-#   python anonimizar.py --ley todo          → todas las jurisdicciones
-#   python anonimizar.py --lista-leyes       → muestra jurisdicciones disponibles
+#   python anonimizar.py archivo.csv                  → genera archivo_anon.csv
+#   python anonimizar.py *.docx --ley chile           → varios archivos
+#   python anonimizar.py C:/exports/ --ley rgpd       → carpeta completa
+#   python anonimizar.py datos.csv --salida limpio.csv → salida explícita
+#   python anonimizar.py C:/exports/ --carpeta-salida C:/anon/
+#   python anonimizar.py --lista-leyes
 #
 # Formatos soportados: .csv, .xlsx, .md, .docx
-# Carpetas: entrada/ → salida/ (relativas al script)
+# Salida por defecto: [nombre]_anon.[ext] en la misma carpeta del original
 # =============================================================================
 
 import os
@@ -43,13 +44,25 @@ JURISDICCIONES_DISPONIBLES = ["rgpd", "chile", "brasil", "mexico", "colombia", "
 
 parser = argparse.ArgumentParser(
     description="Anonimizador multi-jurisdiccional de datos personales.",
-    formatter_class=argparse.RawTextHelpFormatter
+    formatter_class=argparse.RawTextHelpFormatter,
+    epilog=(
+        "Ejemplos:\n"
+        "  python anonimizar.py informe.docx\n"
+        "  python anonimizar.py datos.csv clientes.xlsx --ley chile\n"
+        "  python anonimizar.py C:/exports/ --ley rgpd\n"
+        "  python anonimizar.py datos.csv --salida datos_limpio.csv --ley rgpd\n"
+        "  python anonimizar.py C:/exports/ --carpeta-salida C:/anon/ --ley todo\n"
+    )
+)
+parser.add_argument(
+    "entradas", nargs="*", metavar="ARCHIVO_O_CARPETA",
+    help="Archivos o carpetas a procesar. Acepta varios a la vez."
 )
 parser.add_argument(
     "--ley", nargs="+", default=["rgpd"],
     metavar="LEY",
     help=(
-        "Jurisdicción(es) a aplicar. Valores posibles:\n"
+        "Jurisdicción(es) a aplicar:\n"
         "  rgpd       UE — RGPD/GDPR 2016/679\n"
         "  chile      Chile — Ley 21.719 / 19.628\n"
         "  brasil     Brasil — LGPD Lei 13.709/2018\n"
@@ -59,8 +72,15 @@ parser.add_argument(
         "  uk         UK GDPR / Data Protection Act 2018\n"
         "  ccpa       California — CCPA/CPRA\n"
         "  todo       Activa todas las anteriores\n"
-        "Ejemplo: --ley rgpd chile brasil"
     )
+)
+parser.add_argument(
+    "--salida", metavar="ARCHIVO",
+    help="Ruta de salida explícita (solo válido con un único archivo de entrada)."
+)
+parser.add_argument(
+    "--carpeta-salida", metavar="CARPETA",
+    help="Carpeta de destino para todos los archivos procesados."
 )
 parser.add_argument(
     "--lista-leyes", action="store_true",
@@ -646,12 +666,8 @@ def procesar_docx(ruta_entrada: str, ruta_salida: str):
     print(f"  DOCX guardado: {ruta_salida}")
 
 # =============================================================================
-# PARTE 8: Bucle principal
+# PARTE 8: Resolución de rutas y bucle principal
 # =============================================================================
-
-CARPETA_ENTRADA = os.path.join(os.path.dirname(__file__), "entrada")
-CARPETA_SALIDA  = os.path.join(os.path.dirname(__file__), "salida")
-os.makedirs(CARPETA_SALIDA, exist_ok=True)
 
 PROCESADORES = {
     ".csv":  procesar_csv,
@@ -660,27 +676,75 @@ PROCESADORES = {
     ".docx": procesar_docx,
 }
 
-archivos = [
-    f for f in os.listdir(CARPETA_ENTRADA)
-    if os.path.isfile(os.path.join(CARPETA_ENTRADA, f))
-]
+
+def ruta_salida_para(ruta_entrada: str) -> str:
+    """
+    Calcula la ruta de salida para un archivo dado.
+    Orden de prioridad:
+      1. --salida  (solo con un único archivo)
+      2. --carpeta-salida / nombre_anon.ext
+      3. misma carpeta que el original / nombre_anon.ext
+    """
+    if args.salida:
+        return args.salida
+    nombre, ext = os.path.splitext(os.path.basename(ruta_entrada))
+    nombre_anon = f"{nombre}_anon{ext}"
+    if args.carpeta_salida:
+        os.makedirs(args.carpeta_salida, exist_ok=True)
+        return os.path.join(args.carpeta_salida, nombre_anon)
+    return os.path.join(os.path.dirname(os.path.abspath(ruta_entrada)), nombre_anon)
+
+
+def recopilar_archivos(entradas: list) -> list:
+    """
+    Expande la lista de argumentos (archivos y/o carpetas) en rutas absolutas
+    de archivos con extensión soportada.
+    """
+    rutas = []
+    for entrada in entradas:
+        entrada = os.path.abspath(entrada)
+        if os.path.isdir(entrada):
+            for nombre in os.listdir(entrada):
+                ruta = os.path.join(entrada, nombre)
+                if os.path.isfile(ruta):
+                    rutas.append(ruta)
+        elif os.path.isfile(entrada):
+            rutas.append(entrada)
+        else:
+            print(f"  [AVISO] No encontrado: {entrada}")
+    return rutas
+
+
+# ── Validaciones previas ──────────────────────────────────────────────────────
+
+if not args.entradas:
+    parser.print_help()
+    sys.exit(0)
+
+if args.salida and len(args.entradas) > 1:
+    print("[ERROR] --salida solo es válido con un único archivo de entrada.")
+    sys.exit(1)
+
+archivos = recopilar_archivos(args.entradas)
 
 if not archivos:
-    print("\nNo se encontraron archivos en la carpeta 'entrada'.")
-else:
-    print(f"\nArchivos encontrados: {len(archivos)}\n")
-    for nombre_archivo in archivos:
-        _, extension = os.path.splitext(nombre_archivo)
-        extension = extension.lower()
-        if extension not in PROCESADORES:
-            print(f"  [OMITIDO] {nombre_archivo} (extensión no soportada)")
-            continue
-        ruta_entrada = os.path.join(CARPETA_ENTRADA, nombre_archivo)
-        ruta_salida  = os.path.join(CARPETA_SALIDA, nombre_archivo)
-        print(f"Procesando: {nombre_archivo}")
-        try:
-            PROCESADORES[extension](ruta_entrada, ruta_salida)
-        except Exception as e:
-            print(f"  [ERROR] {nombre_archivo}: {e}")
+    print("No se encontraron archivos para procesar.")
+    sys.exit(0)
+
+# ── Procesado ─────────────────────────────────────────────────────────────────
+
+print(f"Archivos a procesar: {len(archivos)}\n")
+for ruta_entrada in archivos:
+    _, extension = os.path.splitext(ruta_entrada)
+    extension = extension.lower()
+    if extension not in PROCESADORES:
+        print(f"  [OMITIDO] {ruta_entrada} (extensión no soportada)")
+        continue
+    ruta_salida = ruta_salida_para(ruta_entrada)
+    print(f"Procesando: {ruta_entrada}")
+    try:
+        PROCESADORES[extension](ruta_entrada, ruta_salida)
+    except Exception as e:
+        print(f"  [ERROR] {e}")
 
 print("\nAnonimización completada.")

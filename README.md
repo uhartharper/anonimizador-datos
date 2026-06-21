@@ -201,43 +201,47 @@ It works with any combination, as long as at least one model is available.
 
 ## Usage
 
-Place input files in the `entrada/` folder. Output lands in `salida/` with the
-same filenames. The `salida/` folder is created automatically.
-
-```
-anonimizador-datos/
-  entrada/    ← original files go here
-  salida/     ← anonymized output (auto-created)
-  anonimizar.py
-  requirements.txt
-```
-
-### CLI
+Pass files or folders directly as arguments. Output is written to the same
+location as the input with `_anon` appended to the filename. The original
+is never modified.
 
 ```bash
-# RGPD/GDPR only (default)
-python anonimizar.py
+# Single file — produces informe_anon.docx in the same folder
+python anonimizar.py informe.docx
 
-# Single jurisdiction
-python anonimizar.py --ley chile
-python anonimizar.py --ley brasil
-python anonimizar.py --ley mexico
-python anonimizar.py --ley colombia
-python anonimizar.py --ley argentina
-python anonimizar.py --ley uk
-python anonimizar.py --ley ccpa
+# Single file with RGPD rules
+python anonimizar.py informe.docx --ley rgpd
 
-# Multiple jurisdictions simultaneously
-python anonimizar.py --ley rgpd chile
-python anonimizar.py --ley rgpd brasil
-python anonimizar.py --ley chile colombia argentina
+# Multiple files
+python anonimizar.py datos.csv clientes.xlsx notas.md --ley chile
 
-# All jurisdictions at once
-python anonimizar.py --ley todo
+# Entire folder
+python anonimizar.py C:/exports/ --ley rgpd
+
+# Explicit output file (single input only)
+python anonimizar.py datos.csv --salida datos_limpio.csv --ley rgpd
+
+# Explicit output folder (multiple files or folder input)
+python anonimizar.py C:/exports/ --carpeta-salida C:/anon/ --ley todo
+
+# Multiple jurisdictions at once
+python anonimizar.py datos.csv --ley rgpd chile brasil
+
+# All jurisdictions
+python anonimizar.py datos.csv --ley todo
 
 # List available jurisdictions
 python anonimizar.py --lista-leyes
 ```
+
+### Output naming
+
+| Input | Output |
+|---|---|
+| `datos.csv` | `datos_anon.csv` (same folder) |
+| `informe.docx` | `informe_anon.docx` (same folder) |
+| `datos.csv --salida limpio.csv` | `limpio.csv` |
+| `C:/exports/ --carpeta-salida C:/anon/` | `C:/anon/[name]_anon.[ext]` |
 
 ### Supported file formats
 
@@ -282,10 +286,11 @@ The skill is invocation-only — it does not auto-trigger.
 
 ## Version
 
-**v2.0.0** — June 2026
+**v2.1.0** — June 2026
 
 | Version | Date      | Changes                                                       |
 |---------|-----------|---------------------------------------------------------------|
+| 2.1.0   | 2026-06   | Flexible CLI: pass files or folders directly, `--salida`, `--carpeta-salida` |
 | 2.0.0   | 2026-06   | Multi-jurisdiction support: Chile, Brasil, México, Colombia, Argentina, UK, CCPA |
 | 1.0.0   | 2025      | Initial release — RGPD/GDPR, Spanish patterns, Screaming Frog detection |
 
