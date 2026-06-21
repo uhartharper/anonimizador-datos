@@ -284,17 +284,6 @@ The skill is invocation-only — it does not auto-trigger.
 
 ---
 
-## Version
-
-**v2.1.0** — June 2026
-
-| Version | Date      | Changes                                                       |
-|---------|-----------|---------------------------------------------------------------|
-| 2.1.0   | 2026-06   | Flexible CLI: pass files or folders directly, `--salida`, `--carpeta-salida` |
-| 2.0.0   | 2026-06   | Multi-jurisdiction support: Chile, Brasil, México, Colombia, Argentina, UK, CCPA |
-| 1.0.0   | 2025      | Initial release — RGPD/GDPR, Spanish patterns, Screaming Frog detection |
-
----
 
 ## License
 
