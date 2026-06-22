@@ -10,7 +10,7 @@ argument-hint: "[restaurar] [ruta-archivo-o-carpeta] [para <jurisdicción>]"
 license: MIT
 metadata:
   author: PubliUp SEO
-  version: "2.1.0"
+  version: "2.2.0"
   category: privacy
 ---
 
@@ -40,7 +40,13 @@ momento.
 ```
 /anonimizar restaurar clientes_anon.csv
 /anonimizar restaurar C:/anon/informe_anon.docx
+/anonimizar restaurar C:/anon/                 (carpeta completa)
+/anonimizar restaurar resultado_ia.docx        (archivo devuelto por una IA)
 ```
+
+Flujo completo previsto: **anonimizar → procesar el `_anon` con una IA → restaurar el resultado**.
+La restauración funciona sobre cualquier archivo que conserve los tokens, aunque
+la IA lo haya devuelto con otro nombre (ver resolución del mapa más abajo).
 
 ---
 
@@ -98,13 +104,29 @@ Genera dos archivos por cada entrada:
 ### Restauración
 
 ```bash
+# Un archivo
 py anonimizar.py [ruta_anon] --restaurar
+
+# Una carpeta (procesa primer nivel; ignora .key.json y *_restaurado previos)
+py anonimizar.py [carpeta] --restaurar
+
+# Mapa explícito (necesario si hay varios .key.json en la carpeta)
+py anonimizar.py [archivo] --restaurar --mapa [ruta.key.json]
 ```
 
-Busca automáticamente el `.key.json` en la misma carpeta.
-No carga modelos NLP — es inmediato.
+No carga modelos NLP — es inmediato. Genera `[nombre]_restaurado.[ext]`.
 
-Genera: `[nombre]_anon_restaurado.[ext]`
+**Resolución del mapa `.key.json`** (en este orden):
+1. `--mapa` explícito → se aplica a todas las entradas.
+2. `[archivo].key.json` con nombre exacto, junto al archivo (caso anonimización directa).
+3. Si en la carpeta hay un único `.key.json`, se usa ese — esto cubre el caso de
+   un archivo devuelto por una IA con nombre distinto pero situado junto a su mapa.
+4. Si hay varios `.key.json` y ninguno coincide por nombre → error pidiendo `--mapa`
+   (para no mezclar tokens de archivos distintos: `<PERSONA-1>` no significa lo mismo
+   en dos mapas diferentes).
+
+Requisito: el archivo a restaurar debe **conservar los tokens** (`<PERSONA-1>`, etc.).
+Si la IA los borró o alteró, esos valores no se recuperan.
 
 ---
 

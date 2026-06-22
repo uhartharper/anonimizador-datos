@@ -38,21 +38,50 @@ python anonimizar.py original.csv --ley rgpd
      └── original_anon.csv.key.json ← map {token → original value}
 ```
 
-### Restoration
+### The full round-trip: anonymize → process with AI → restore
+
+The intended workflow is to anonymize a file, hand the tokenized version to an
+AI tool (which never sees the real data), and restore the tokens in whatever the
+AI returns:
 
 ```
-original_anon.csv  +  original_anon.csv.key.json
-     │
-     ▼
-python anonimizar.py original_anon.csv --restaurar
-     │
-     ├── Loads the .key.json map
-     ├── Replaces every token with its original value
-     │
-     └── original_anon_restaurado.csv  ← identical to the source file
+1. ANONYMIZE
+   informe.docx  →  informe_anon.docx  +  informe_anon.docx.key.json
+
+2. PROCESS WITH AI
+   informe_anon.docx  →  [ChatGPT / Claude / ...]  →  result.docx
+                         (the AI only ever sees tokens, never real PII)
+
+3. RESTORE
+   result.docx  →  result_restaurado.docx
+                   (tokens replaced back with real values)
+```
+
+```bash
+# Restore a single file (auto-locates the .key.json next to it)
+python anonimizar.py informe_anon.docx --restaurar
+
+# Restore an entire folder (first level; skips .key.json and *_restaurado files)
+python anonimizar.py C:/anon/ --restaurar
+
+# Restore an AI-returned file that was renamed — point to the original map
+python anonimizar.py result.docx --restaurar --mapa informe_anon.docx.key.json
 ```
 
 No NLP models are loaded during restoration — it starts in under a second.
+
+**Map resolution order** for restoration:
+
+1. `--mapa` explicit → applied to every input.
+2. `[file].key.json` exact name match next to the file (direct anonymization case).
+3. A single `.key.json` in the folder → used for any token-bearing file. This
+   covers an AI-returned file with a different name placed next to its original map.
+4. Multiple `.key.json` with no name match → error asking for `--mapa`, to avoid
+   mixing tokens across files (`<PERSONA-1>` is not the same value in two maps).
+
+> Restoration works on any file that still contains the tokens. If the AI deleted
+> or altered a token, that value cannot be recovered. The result is the processed
+> file with real values reinserted — not necessarily byte-identical to the source.
 
 ### The .key.json map
 
@@ -325,15 +354,24 @@ python anonimizar.py --lista-leyes
 ### Restoration
 
 ```bash
-# Auto-locate map (looks for [input].key.json in the same folder)
+# Auto-locate map (exact [input].key.json, or the single .key.json in the folder)
 python anonimizar.py datos_anon.csv --restaurar
 
-# Explicit map file
+# Entire folder (first level; skips .key.json and *_restaurado files)
+python anonimizar.py C:/anon/ --restaurar
+
+# Explicit map file (required if the folder holds several .key.json maps)
 python anonimizar.py datos_anon.csv --restaurar --mapa /secure/datos_anon.csv.key.json
+
+# AI-returned file renamed — restore it with the original map
+python anonimizar.py result.docx --restaurar --mapa informe_anon.docx.key.json
 
 # Restore to a specific folder
 python anonimizar.py datos_anon.csv --restaurar --carpeta-salida C:/restored/
 ```
+
+See [Map resolution order](#the-full-round-trip-anonymize--process-with-ai--restore)
+above for how the `.key.json` is located when not passed explicitly.
 
 ### Output naming
 
