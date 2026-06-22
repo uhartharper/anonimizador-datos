@@ -135,17 +135,48 @@ if args.restaurar:
             datos = json.load(f)
         return datos["mapa"]
 
+    def _mapas_en_carpeta(carpeta: str) -> list:
+        """Lista los archivos .key.json presentes en una carpeta."""
+        if not os.path.isdir(carpeta):
+            return []
+        return sorted(
+            os.path.join(carpeta, n)
+            for n in os.listdir(carpeta)
+            if n.lower().endswith(".key.json")
+        )
+
     def ruta_mapa_para(ruta_entrada: str, mapa_explicito) -> str:
+        """
+        Resuelve qué .key.json usar para un archivo a restaurar.
+        Orden de prioridad:
+          1. --mapa explícito (se aplica a todas las entradas).
+          2. [archivo].key.json exacto, junto al archivo (caso anonimización directa).
+          3. Si en la carpeta hay un único .key.json, se usa ese (caso archivo
+             devuelto por una IA con nombre distinto pero junto a su mapa original).
+          4. Si hay varios .key.json y ninguno coincide por nombre → error pidiendo --mapa.
+        """
         if mapa_explicito:
             return mapa_explicito
         base = os.path.abspath(ruta_entrada)
+        # 2 — coincidencia exacta por nombre
         candidato = base + ".key.json"
         if os.path.isfile(candidato):
             return candidato
+        # 3 / 4 — buscar en la carpeta del archivo
+        carpeta = os.path.dirname(base)
+        mapas = _mapas_en_carpeta(carpeta)
+        if len(mapas) == 1:
+            return mapas[0]
+        if len(mapas) == 0:
+            raise FileNotFoundError(
+                f"No se encontró ningún .key.json para '{ruta_entrada}'.\n"
+                f"Buscado: {candidato} y archivos .key.json en {carpeta}\n"
+                f"Usa --mapa para indicar la ruta del mapa."
+            )
         raise FileNotFoundError(
-            f"No se encontró el archivo de mapa para '{ruta_entrada}'.\n"
-            f"Buscado en: {candidato}\n"
-            f"Usa --mapa para indicar la ruta explícita."
+            f"Hay {len(mapas)} archivos .key.json en {carpeta} y ninguno coincide "
+            f"con el nombre de '{os.path.basename(ruta_entrada)}'.\n"
+            f"Indica cuál usar con --mapa para evitar mezclar tokens de archivos distintos."
         )
 
     def ruta_salida_restaurada_para(ruta_entrada: str) -> str:
@@ -204,25 +235,56 @@ if args.restaurar:
         ".docx": restaurar_docx,
     }
 
+    def recopilar_archivos_restaurar(entradas: list) -> list:
+        """
+        Expande archivos y carpetas en rutas de archivos a restaurar.
+        Excluye los propios .key.json y los archivos ya restaurados (_restaurado).
+        En carpetas, solo recorre el primer nivel.
+        """
+        rutas = []
+        for entrada in entradas:
+            entrada = os.path.abspath(entrada)
+            if os.path.isdir(entrada):
+                for nombre in sorted(os.listdir(entrada)):
+                    ruta = os.path.join(entrada, nombre)
+                    if os.path.isfile(ruta):
+                        rutas.append(ruta)
+            elif os.path.isfile(entrada):
+                rutas.append(entrada)
+            else:
+                print(f"  [AVISO] No encontrado: {entrada}")
+        # Filtrar mapas y salidas previas
+        filtradas = []
+        for r in rutas:
+            base = os.path.basename(r).lower()
+            ext = os.path.splitext(r)[1].lower()
+            if base.endswith(".key.json"):
+                continue
+            if os.path.splitext(os.path.basename(r))[0].endswith("_restaurado"):
+                continue
+            if ext not in RESTAURADORES:
+                print(f"  [OMITIDO] {r} (extensión no soportada)")
+                continue
+            filtradas.append(r)
+        return filtradas
+
     if not args.entradas:
         parser.print_help()
         sys.exit(0)
 
-    if args.salida and len(args.entradas) > 1:
+    archivos_rest = recopilar_archivos_restaurar(args.entradas)
+
+    if args.salida and len(archivos_rest) > 1:
         print("[ERROR] --salida solo es válido con un único archivo de entrada.")
         sys.exit(1)
 
-    print("Modo: RESTAURACIÓN\n")
-    for ruta_entrada in args.entradas:
-        ruta_entrada = os.path.abspath(ruta_entrada)
-        if not os.path.isfile(ruta_entrada):
-            print(f"  [AVISO] No encontrado: {ruta_entrada}")
-            continue
-        _, extension = os.path.splitext(ruta_entrada)
-        extension = extension.lower()
-        if extension not in RESTAURADORES:
-            print(f"  [OMITIDO] {ruta_entrada} (extensión no soportada)")
-            continue
+    if not archivos_rest:
+        print("No se encontraron archivos para restaurar.")
+        sys.exit(0)
+
+    print(f"Modo: RESTAURACIÓN — archivos a procesar: {len(archivos_rest)}\n")
+    for ruta_entrada in archivos_rest:
+        extension = os.path.splitext(ruta_entrada)[1].lower()
         print(f"Restaurando: {ruta_entrada}")
         try:
             ruta_mapa = ruta_mapa_para(ruta_entrada, args.mapa)
