@@ -457,6 +457,53 @@ The skill is invocation-only — it does not auto-trigger.
 - **Short texts (<4 words)**: language detection is unreliable. The script falls back to the first available model.
 - **JavaScript-rendered content**: the tool processes static file content only. It does not fetch or render URLs.
 - **Restoration fidelity**: if the same original value appears with different casing across the file, each variant is stored as a separate token and restored independently.
+- **Street addresses**: a pattern recognizer covers common Spanish street types (`Calle`, `Avenida`, `Plaza`, `Paseo`, etc.) followed by a number. Non-standard or non-Spanish address formats may not be caught.
+- **.docx coverage**: body, tables, headers, footers and text boxes are processed; the paragraph (not the run) is the unit, so split-run names are caught. **Footnotes, endnotes and comments are not yet processed.** Paragraph-level processing flattens partial intra-paragraph formatting (e.g. one bold word) only in paragraphs that contain PII.
+- **`--ley todo` false positives**: running all jurisdictions at once enables low-confidence numeric recognizers (bare CPF/DNI/NIT), which can tag non-personal codes (SKUs, order IDs). The tool warns when four or more jurisdictions are active. Narrow with `--ley <jurisdiction>` for number-heavy data.
+
+---
+
+## Encrypting the key map
+
+By default the `.key.json` holds the PII in plaintext. To protect it, encrypt it
+with a passphrase (AES via Fernet, key derived with PBKDF2-SHA256):
+
+```bash
+# Anonymize and encrypt the map
+python anonimizar.py datos.csv --ley rgpd --cifrar-mapa --clave "mi-clave-secreta"
+
+# Restore — the same key is required
+python anonimizar.py datos_anon.csv --restaurar --clave "mi-clave-secreta"
+```
+
+The passphrase can also be supplied via the `ANON_CLAVE` environment variable.
+Inside the encrypted map only the salt and KDF parameters are in clear; the map
+and the source filename are encrypted. Lose the passphrase and the map is
+unrecoverable.
+
+---
+
+## Coverage reports
+
+After every run the tool prints what it did, turning silent failures into visible ones:
+
+- **After anonymizing**: a breakdown of detected PII types and counts, plus a warning if the source text already contained token-like strings (`<TYPE-N>`).
+- **After restoring**: a warning listing tokens from the map that did not appear in the file (not restored — e.g. an AI altered them) and token-shaped strings with no map entry (residuals).
+
+---
+
+## Tests
+
+A regression suite (`test_anonimizar.py`, stdlib `unittest`) runs the real script
+against fixtures with known PII from every jurisdiction and checks that each
+identifier is tokenized, that the anonymize → restore round-trip is lossless, and
+that map encryption protects the PII and requires the key.
+
+```bash
+python -m unittest test_anonimizar
+```
+
+Requires the spaCy models installed (each anonymization loads them).
 
 ---
 
@@ -475,8 +522,10 @@ information. All patterns are anonymized. The tool is designed precisely to
 help others achieve the same standard.
 
 The `.key.json` files generated during anonymization are never committed to
-this repository. Add `*.key.json` to your `.gitignore` if you work in a
-git-tracked folder.
+this repository. The tool **writes a `.gitignore` with `*.key.json` automatically**
+in the output folder, and warns if the map lands in a cloud-synced folder
+(OneDrive, Dropbox, Google Drive, iCloud). For stronger protection, encrypt the
+map with `--cifrar-mapa` (see below).
 
 ---
 

@@ -6,6 +6,7 @@ pandas>=2.0.0
 openpyxl>=3.1.0
 python-docx>=1.1.0
 langdetect>=1.0.9
+cryptography>=42.0.0   # cifrado opcional del mapa (--cifrar-mapa)
 
 # Modelos de spaCy — instalar manualmente según idiomas necesarios:
 # python -m spacy download es_core_news_lg   (español — mínimo requerido)

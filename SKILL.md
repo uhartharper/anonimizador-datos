@@ -10,7 +10,7 @@ argument-hint: "[restaurar] [ruta-archivo-o-carpeta] [para <jurisdicción>]"
 license: MIT
 metadata:
   author: PubliUp SEO
-  version: "2.2.0"
+  version: "2.3.0"
   category: privacy
 ---
 
@@ -84,7 +84,10 @@ Leer el texto del usuario buscando menciones de jurisdicción:
 
 ## Ejecución
 
-Script de referencia: `D:\OneDrive\Escritorio\Yo\Papitas SEO\anonimizador_rgpd\anonimizar.py`
+Script: `anonimizar.py`. Ubicación de referencia:
+`D:\OneDrive\Escritorio\Yo\Papitas SEO\anonimizador_rgpd\anonimizar.py`.
+Si no está ahí, localizarlo (`anonimizar.py` en el proyecto) o clonar
+`github.com/uhartharper/anonimizador-datos`. Ejecutar desde su carpeta con `py`/`python`.
 
 ### Anonimización
 
@@ -95,11 +98,17 @@ py anonimizar.py [ruta] --ley todo
 # Con jurisdicción específica detectada del texto
 py anonimizar.py [ruta] --ley rgpd
 py anonimizar.py [ruta] --ley chile brasil
+
+# Cifrar el mapa (opcional): protege la PII del .key.json con una clave
+py anonimizar.py [ruta] --cifrar-mapa --clave "<clave>"
 ```
 
 Genera dos archivos por cada entrada:
 - `[nombre]_anon.[ext]` — archivo con tokens, sin PII
-- `[nombre]_anon.[ext].key.json` — mapa `{token → valor original}`
+- `[nombre]_anon.[ext].key.json` — mapa `{token → valor original}` (cifrado si se usó `--cifrar-mapa`)
+
+Tras anonimizar el script imprime un **reporte de cobertura** (tipos detectados + conteo),
+crea un `.gitignore` con `*.key.json` y avisa si el mapa cae en una carpeta sincronizada.
 
 ### Restauración
 
@@ -112,9 +121,14 @@ py anonimizar.py [carpeta] --restaurar
 
 # Mapa explícito (necesario si hay varios .key.json en la carpeta)
 py anonimizar.py [archivo] --restaurar --mapa [ruta.key.json]
+
+# Mapa cifrado: aportar la misma clave usada al anonimizar
+py anonimizar.py [archivo] --restaurar --clave "<clave>"
 ```
 
 No carga modelos NLP — es inmediato. Genera `[nombre]_restaurado.[ext]`.
+Tras restaurar, el script **avisa de tokens del mapa que no aparecían** en el archivo
+(no restaurados, p.ej. alterados por la IA) y de tokens residuales sin mapear.
 
 **Resolución del mapa `.key.json`** (en este orden):
 1. `--mapa` explícito → se aplica a todas las entradas.
@@ -175,7 +189,7 @@ La restauración no requiere modelos instalados.
 
 Numerados por tipo, reutilizados si el mismo valor aparece varias veces:
 
-`<PERSONA-1>` `<EMAIL-1>` `<TELEFONO-1>` `<DNI-ES-1>` `<RUT-CL-1>`
+`<PERSONA-1>` `<EMAIL-1>` `<TELEFONO-1>` `<DIRECCION-1>` `<DNI-ES-1>` `<RUT-CL-1>`
 `<CPF-BR-1>` `<CURP-MX-1>` `<NIT-CO-1>` `<CUIT-AR-1>` `<NINO-UK-1>` `<SSN-US-1>`
 
 ---
@@ -188,3 +202,6 @@ Numerados por tipo, reutilizados si el mismo valor aparece varias veces:
 - **DNI argentino sin puntos:** score 0,55 — revisar salida si hay códigos numéricos en el archivo.
 - **CPF brasileño sin formato:** score 0,60 — usar formato con puntos y guiones si es posible.
 - **Textos cortos (<4 palabras):** detección de idioma no fiable; usa el modelo por defecto.
+- **Direcciones:** cubre vías hispanas comunes (Calle, Avenida, Plaza...) + número. Formatos atípicos o no hispanos pueden escaparse.
+- **`.docx`:** procesa cuerpo, tablas, encabezados, pies y cuadros de texto (a nivel de párrafo, capta nombres partidos en runs). **No** procesa notas al pie ni comentarios.
+- **`--ley todo`:** máxima cobertura pero más falsos positivos en códigos numéricos (SKUs, IDs). El script avisa con 4+ jurisdicciones; restringir si el archivo tiene muchos números.

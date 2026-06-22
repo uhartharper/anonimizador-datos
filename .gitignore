@@ -3,3 +3,6 @@ salida/
 __pycache__/
 *.pyc
 .env
+
+# Mapas de anonimización — contienen PII en claro, nunca versionar
+*.key.json

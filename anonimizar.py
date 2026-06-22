@@ -104,13 +104,73 @@ parser.add_argument(
         "Por defecto se busca [archivo_anon].[ext].key.json en la misma carpeta."
     )
 )
+parser.add_argument(
+    "--cifrar-mapa", action="store_true",
+    help=(
+        "Cifra el .key.json con una clave (AES vía Fernet). El mapa con PII queda\n"
+        "ilegible sin la clave. Requiere --clave o la variable de entorno ANON_CLAVE."
+    )
+)
+parser.add_argument(
+    "--clave", metavar="PASSPHRASE",
+    help=(
+        "Clave para cifrar (--cifrar-mapa) o descifrar (--restaurar) el mapa.\n"
+        "Alternativa: variable de entorno ANON_CLAVE."
+    )
+)
 args = parser.parse_args()
+
+# Clave efectiva: prioriza --clave, cae a ANON_CLAVE
+CLAVE_MAPA = args.clave or os.environ.get("ANON_CLAVE")
 
 if args.lista_leyes:
     print("Jurisdicciones disponibles:")
     for ley in JURISDICCIONES_DISPONIBLES:
         print(f"  {ley}")
     sys.exit(0)
+
+# =============================================================================
+# Cifrado opcional del mapa (.key.json) — AES vía Fernet, clave derivada con PBKDF2
+# =============================================================================
+
+def _derivar_fernet(clave: str, salt: bytes, iteraciones: int = 200_000):
+    import base64
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.fernet import Fernet
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=iteraciones)
+    return Fernet(base64.urlsafe_b64encode(kdf.derive(clave.encode("utf-8"))))
+
+
+def cifrar_mapa_dict(datos: dict, clave: str) -> dict:
+    """Devuelve un sobre cifrado: solo metadatos de cifrado en claro; el resto
+    (incluido archivo_origen y el mapa) va dentro del bloque cifrado."""
+    import os as _os, base64
+    salt = _os.urandom(16)
+    iteraciones = 200_000
+    f = _derivar_fernet(clave, salt, iteraciones)
+    token = f.encrypt(json.dumps(datos, ensure_ascii=False).encode("utf-8"))
+    return {
+        "version": datos.get("version", "2.3"),
+        "cifrado": True,
+        "kdf": "pbkdf2-sha256",
+        "iteraciones": iteraciones,
+        "salt": base64.b64encode(salt).decode("ascii"),
+        "datos": token.decode("ascii"),
+    }
+
+
+def descifrar_mapa_dict(sobre: dict, clave: str) -> dict:
+    import base64
+    salt = base64.b64decode(sobre["salt"])
+    iteraciones = sobre.get("iteraciones", 200_000)
+    f = _derivar_fernet(clave, salt, iteraciones)
+    return json.loads(f.decrypt(sobre["datos"].encode("ascii")).decode("utf-8"))
+
+
+if args.cifrar_mapa and not CLAVE_MAPA:
+    print("[ERROR] --cifrar-mapa requiere una clave: usa --clave o la variable ANON_CLAVE.")
+    sys.exit(1)
 
 # =============================================================================
 # PARTE 0b: Modo restauración — inicialización temprana (sin NLP)
@@ -122,17 +182,58 @@ if args.restaurar:
     import pandas as pd
     from docx import Document
 
+    # Patrón de token generado por la anonimización: <PREFIJO-N> (p.ej. <PERSONA-1>,
+    # <DNI-ES-2>). Sirve para detectar tokens presentes en el archivo y residuos
+    # sin mapear. Se rastrea por archivo para informar de pérdidas.
+    _PATRON_TOKEN = re.compile(r"<[A-Z]+(?:-[A-Z]+)*-\d+>")
+    _tokens_vistos = set()
+    _tokens_residuales = set()
+
+    def _reset_seguimiento():
+        _tokens_vistos.clear()
+        _tokens_residuales.clear()
+
     def restaurar_texto(texto: str, mapa: dict) -> str:
         if not texto or not texto.strip():
             return texto
+        # Registrar qué tokens aparecen: los del mapa (vistos) y los que tienen
+        # formato de token pero no están en el mapa (residuos / alterados).
+        for m in _PATRON_TOKEN.finditer(texto):
+            tok = m.group(0)
+            (_tokens_vistos if tok in mapa else _tokens_residuales).add(tok)
         # Ordenar por longitud descendente para evitar sustituciones parciales
         for token, original in sorted(mapa.items(), key=lambda x: len(x[0]), reverse=True):
             texto = texto.replace(token, original)
         return texto
 
+    def _reporte_restauracion(mapa: dict):
+        no_encontrados = set(mapa) - _tokens_vistos
+        if no_encontrados:
+            muestra = ", ".join(sorted(no_encontrados)[:8])
+            print(f"  [AVISO] {len(no_encontrados)} token(s) del mapa no aparecían en el "
+                  f"archivo (no restaurados): {muestra}"
+                  + (" ..." if len(no_encontrados) > 8 else ""))
+        if _tokens_residuales:
+            muestra = ", ".join(sorted(_tokens_residuales)[:8])
+            print(f"  [AVISO] {len(_tokens_residuales)} token(s) con formato válido sin "
+                  f"entrada en el mapa (posible alteración por IA o mapa erróneo): {muestra}"
+                  + (" ..." if len(_tokens_residuales) > 8 else ""))
+        if not no_encontrados and not _tokens_residuales:
+            print(f"  Cobertura: {len(_tokens_vistos)} token(s) restaurados, sin residuos.")
+
     def cargar_mapa(ruta_mapa: str) -> dict:
         with open(ruta_mapa, "r", encoding="utf-8") as f:
             datos = json.load(f)
+        if datos.get("cifrado"):
+            if not CLAVE_MAPA:
+                raise ValueError(
+                    f"El mapa '{os.path.basename(ruta_mapa)}' está cifrado. "
+                    f"Indica la clave con --clave o la variable ANON_CLAVE."
+                )
+            try:
+                datos = descifrar_mapa_dict(datos, CLAVE_MAPA)
+            except Exception:
+                raise ValueError("Clave incorrecta o mapa cifrado dañado: no se pudo descifrar.")
         return datos["mapa"]
 
     def _mapas_en_carpeta(carpeta: str) -> list:
@@ -291,7 +392,9 @@ if args.restaurar:
             mapa = cargar_mapa(ruta_mapa)
             print(f"  Mapa cargado: {ruta_mapa} ({len(mapa)} tokens)")
             ruta_salida = ruta_salida_restaurada_para(ruta_entrada)
+            _reset_seguimiento()
             RESTAURADORES[extension](ruta_entrada, ruta_salida, mapa)
+            _reporte_restauracion(mapa)
         except Exception as e:
             print(f"  [ERROR] {e}")
 
@@ -374,6 +477,7 @@ ETIQUETAS = {
     "DATE_TIME":       "FECHA",
     "IP_ADDRESS":      "IP",
     "LOCATION":        "UBICACION",
+    "DIRECCION":       "DIRECCION",
     "DNI_NIE":         "DNI-ES",
     "RUT_CL":          "RUT-CL",
     "CPF_BR":          "CPF-BR",
@@ -414,6 +518,33 @@ def _registrar_para_todos(name_prefix, entity, patterns):
             supported_language=lang,
             supported_entity=entity,
         ))
+
+
+def activar_comunes():
+    """Reconocedores universales activos en toda jurisdicción. Direcciones
+    postales (calle + número): spaCy detecta ciudades como LOCATION pero no la
+    vía completa, que es PII directa. Patrón orientado a vías hispanas; cubre
+    las formas más frecuentes con un score moderado para limitar falsos positivos."""
+    via = (
+        r"(?:calle|c/|c\.|avenida|avda\.?|av\.?|plaza|pza\.?|paseo|p\.º|camino|"
+        r"carrer|ronda|travesía|travesia|glorieta|callejón|callejon|pasaje|"
+        r"urbanización|urbanizacion|polígono|poligono|rúa|rua|carretera|ctra\.?)"
+    )
+    patrones_direccion = [
+        # Vía + nombre + número (con nº/num opcional). Acepta piso/puerta tras coma.
+        # (?i): insensible a mayúsculas ("Calle" y "calle").
+        # Score 0.90 > 0.85 de spaCy LOCATION: una dirección completa es más
+        # específica y sensible que una ciudad, y debe ganar el solapamiento
+        # (si no, LOCATION captura solo "Calle Mayor" y la dirección se escapa).
+        Pattern(
+            "Direccion_via_num",
+            r"(?i)" + via + r"\s+[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9.\-º'\s]{2,60}?,?\s*(?:n[ºo°.]?\s*)?\d{1,4}"
+            r"(?:\s*,?\s*(?:bis|[0-9]{1,3}\s*[ºª°]?)\s*[A-DEIzqdcha.\-]{0,6})?",
+            0.90,
+        ),
+    ]
+    _registrar_para_todos(None, "DIRECCION", patrones_direccion)
+    print("  [Comunes] Reconocedor de direcciones postales activado.")
 
 
 def activar_rgpd():
@@ -635,8 +766,21 @@ ACTIVADORES = {
 }
 
 print("Activando reconocedores:")
+activar_comunes()
 for ley in sorted(leyes_activas):
     ACTIVADORES[ley]()
+
+# Aviso del modo "todo": maximiza cobertura legal pero activa a la vez los
+# reconocedores de baja confianza de varias jurisdicciones (CPF sin formato,
+# DNI argentino, NIT...), que pueden tokenizar secuencias numéricas no-PII
+# (SKUs, números de pedido). Es seguro frente a fugas, pero puede generar falsos
+# positivos. Para datos con muchos códigos numéricos, restringir a una jurisdicción.
+if len(leyes_activas) >= 4:
+    print(
+        "  [AVISO] Varias jurisdicciones activas: máxima cobertura, pero los patrones "
+        "numéricos de baja confianza pueden marcar códigos no personales (SKUs, IDs). "
+        "Si el archivo tiene muchos números, restringe con --ley <jurisdicción>."
+    )
 
 ENTIDADES = ENTIDADES_BASE + [
     e for e in ETIQUETAS
@@ -672,11 +816,23 @@ _mapa_token_a_original: dict = {}
 _mapa_original_a_token: dict = {}
 _contadores_tipo: dict = {}
 
+# Patrón con el que la anonimización genera tokens. Si el texto FUENTE ya contiene
+# una cadena con este formato (p.ej. un manual que documenta <EMAIL-1>), la
+# restauración podría alterarla. Se detecta para avisar, sin bloquear.
+_PATRON_TOKEN_FUENTE = re.compile(r"<[A-Z]+(?:-[A-Z]+)*-\d+>")
+_colision_token = {"detectada": False}
+
 
 def _reset_mapa():
     _mapa_token_a_original.clear()
     _mapa_original_a_token.clear()
     _contadores_tipo.clear()
+    _colision_token["detectada"] = False
+
+
+def _marcar_colision(texto: str):
+    if texto and "<" in texto and _PATRON_TOKEN_FUENTE.search(texto):
+        _colision_token["detectada"] = True
 
 
 def _token_para(entidad_tipo: str, valor_original: str) -> str:
@@ -691,19 +847,73 @@ def _token_para(entidad_tipo: str, valor_original: str) -> str:
     return token
 
 
+CARPETAS_SINCRONIZADAS = ("onedrive", "dropbox", "google drive", "googledrive", "icloud", "box sync")
+
+
+def _asegurar_gitignore(carpeta: str):
+    """Crea o completa un .gitignore en la carpeta de salida para que los mapas
+    .key.json (que contienen PII en claro) nunca se suban a un repositorio."""
+    ruta_gi = os.path.join(carpeta, ".gitignore")
+    patrones = {"*.key.json"}
+    existentes = set()
+    if os.path.isfile(ruta_gi):
+        with open(ruta_gi, "r", encoding="utf-8") as f:
+            existentes = {l.strip() for l in f}
+    faltan = patrones - existentes
+    if faltan:
+        with open(ruta_gi, "a", encoding="utf-8") as f:
+            if existentes:
+                f.write("\n")
+            f.write("# Mapas de anonimización — contienen PII en claro, nunca versionar\n")
+            for p in sorted(faltan):
+                f.write(p + "\n")
+
+
+def _avisar_si_sincronizada(ruta_mapa: str):
+    """Advierte si el mapa con PII queda en una carpeta sincronizada a la nube."""
+    ruta_baja = ruta_mapa.lower()
+    for marca in CARPETAS_SINCRONIZADAS:
+        if marca in ruta_baja:
+            print(
+                f"  [AVISO PRIVACIDAD] El mapa contiene PII en claro y está en una carpeta "
+                f"sincronizada ({marca}). Considera moverlo fuera de la nube o cifrarlo."
+            )
+            break
+
+
 def _guardar_mapa(ruta_anon: str, archivo_origen: str):
     ruta_mapa = ruta_anon + ".key.json"
     datos = {
-        "version": "2.2",
+        "version": "2.3",
         "ley": sorted(leyes_activas),
         "fecha": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "archivo_origen": os.path.basename(archivo_origen),
         "advertencia": "Este archivo contiene datos personales originales. Trátalo con el mismo nivel de protección que el archivo fuente.",
         "mapa": _mapa_token_a_original.copy(),
     }
+    cifrado = bool(args.cifrar_mapa and CLAVE_MAPA)
+    contenido = cifrar_mapa_dict(datos, CLAVE_MAPA) if cifrado else datos
     with open(ruta_mapa, "w", encoding="utf-8") as f:
-        json.dump(datos, f, ensure_ascii=False, indent=2)
-    print(f"  Mapa guardado: {ruta_mapa} ({len(_mapa_token_a_original)} tokens)")
+        json.dump(contenido, f, ensure_ascii=False, indent=2)
+    carpeta = os.path.dirname(os.path.abspath(ruta_mapa))
+    _asegurar_gitignore(carpeta)
+    estado = "cifrado" if cifrado else "en claro"
+    print(f"  Mapa guardado ({estado}): {ruta_mapa} ({len(_mapa_token_a_original)} tokens)")
+    if not cifrado:
+        _avisar_si_sincronizada(ruta_mapa)
+
+
+def _reporte_cobertura():
+    """Imprime el desglose de tipos de PII detectados en el último archivo."""
+    if _colision_token["detectada"]:
+        print("  [AVISO] El texto original ya contenía cadenas con formato de token "
+              "(<TIPO-N>); la restauración podría alterarlas. Revisa el resultado.")
+    if not _contadores_tipo:
+        print("  Cobertura: no se detectó ninguna entidad de PII.")
+        return
+    print("  Cobertura de detección (valores únicos por tipo):")
+    for prefijo in sorted(_contadores_tipo, key=lambda p: (-_contadores_tipo[p], p)):
+        print(f"    - {prefijo}: {_contadores_tipo[prefijo]}")
 
 # =============================================================================
 # PARTE 7: Función principal de anonimización de texto
@@ -737,6 +947,7 @@ def _detectar_spans(texto: str):
     if not texto or not texto.strip():
         return []
 
+    _marcar_colision(texto)
     texto_para_analisis = _normalizar_mayusculas(texto)
     idioma = _detectar_idioma(texto_para_analisis)
 
@@ -891,17 +1102,67 @@ def procesar_md(ruta_entrada: str, ruta_salida: str):
     print(f"  MD guardado: {ruta_salida}")
 
 
-def procesar_docx(ruta_entrada: str, ruta_salida: str):
-    doc = Document(ruta_entrada)
-    for parrafo in doc.paragraphs:
-        for run in parrafo.runs:
-            run.text = anonimizar_texto(run.text)
-    for tabla in doc.tables:
+def _anonimizar_parrafo_docx(parrafo):
+    """
+    Anonimiza un párrafo completo, no run por run. Word fragmenta el texto en
+    runs arbitrarios ("Juan Gar" + "cía"), de modo que analizar cada run aislado
+    deja escapar nombres partidos. Se analiza el texto unido del párrafo y, solo
+    si hay detecciones, se vuelca el resultado en el primer run y se vacían los
+    demás. Los párrafos sin PII conservan sus runs y formato intactos.
+    """
+    runs = parrafo.runs
+    if not runs:
+        return
+    texto_completo = "".join(r.text for r in runs)
+    if not texto_completo.strip():
+        return
+    texto_anon = anonimizar_texto(texto_completo)
+    if texto_anon == texto_completo:
+        return  # sin cambios: no se toca el formato del párrafo
+    runs[0].text = texto_anon
+    for r in runs[1:]:
+        r.text = ""
+
+
+def _anonimizar_contenedor_docx(contenedor):
+    """Recorre los párrafos y tablas (recursivas) de un contenedor: cuerpo del
+    documento, celda de tabla, encabezado o pie de página."""
+    for parrafo in contenedor.paragraphs:
+        _anonimizar_parrafo_docx(parrafo)
+    for tabla in contenedor.tables:
         for fila in tabla.rows:
             for celda in fila.cells:
-                for parrafo in celda.paragraphs:
-                    for run in parrafo.runs:
-                        run.text = anonimizar_texto(run.text)
+                _anonimizar_contenedor_docx(celda)
+
+
+def _anonimizar_textboxes_docx(doc):
+    """Anonimiza los párrafos dentro de cuadros de texto (w:txbxContent), que no
+    aparecen en doc.paragraphs. Reutiliza la lógica de párrafo (runs unidos)."""
+    try:
+        from docx.oxml.ns import qn
+        from docx.text.paragraph import Paragraph
+    except Exception:
+        return
+    for txbx in doc.element.iter(qn("w:txbxContent")):
+        for p_el in txbx.iter(qn("w:p")):
+            _anonimizar_parrafo_docx(Paragraph(p_el, None))
+
+
+def procesar_docx(ruta_entrada: str, ruta_salida: str):
+    doc = Document(ruta_entrada)
+    # Cuerpo principal (párrafos + tablas)
+    _anonimizar_contenedor_docx(doc)
+    # Encabezados y pies de cada sección (incluye variantes de primera página
+    # y páginas pares cuando el documento las define)
+    for seccion in doc.sections:
+        for parte in (
+            seccion.header, seccion.footer,
+            seccion.first_page_header, seccion.first_page_footer,
+            seccion.even_page_header, seccion.even_page_footer,
+        ):
+            _anonimizar_contenedor_docx(parte)
+    # Cuadros de texto del cuerpo
+    _anonimizar_textboxes_docx(doc)
     doc.save(ruta_salida)
     print(f"  DOCX guardado: {ruta_salida}")
 
@@ -971,5 +1232,6 @@ for ruta_entrada in archivos:
     try:
         PROCESADORES[extension](ruta_entrada, ruta_salida)
         _guardar_mapa(ruta_salida, ruta_entrada)
+        _reporte_cobertura()
     except Exception as e:
         print(f"  [ERROR] {e}")
