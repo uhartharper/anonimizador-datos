@@ -1,5 +1,5 @@
 # =============================================================================
-# anonimizar.py — Anonimizador multi-jurisdiccional v2.1
+# anonimizar.py — Anonimizador multi-jurisdiccional v2.2
 #
 # Jurisdicciones soportadas:
 #   rgpd      — UE (RGPD/GDPR 2016/679)
@@ -12,29 +12,31 @@
 #   ccpa      — CCPA/CPRA + regs. enero 2026 (California, EE.UU.)
 #   todo      — Activa todas las jurisdicciones simultáneamente
 #
-# Uso:
-#   python anonimizar.py archivo.csv                  → genera archivo_anon.csv
+# Uso — anonimización:
+#   python anonimizar.py archivo.csv                  → genera archivo_anon.csv + archivo_anon.csv.key.json
 #   python anonimizar.py *.docx --ley chile           → varios archivos
 #   python anonimizar.py C:/exports/ --ley rgpd       → carpeta completa
 #   python anonimizar.py datos.csv --salida limpio.csv → salida explícita
 #   python anonimizar.py C:/exports/ --carpeta-salida C:/anon/
 #   python anonimizar.py --lista-leyes
 #
+# Uso — restauración:
+#   python anonimizar.py archivo_anon.csv --restaurar
+#     → busca archivo_anon.csv.key.json en la misma carpeta → genera archivo_anon_restaurado.csv
+#   python anonimizar.py archivo_anon.csv --restaurar --mapa otra_ruta.key.json
+#     → usa el archivo de mapa indicado explícitamente
+#
 # Formatos soportados: .csv, .xlsx, .md, .docx
-# Salida por defecto: [nombre]_anon.[ext] en la misma carpeta del original
+# Salida anonimización: [nombre]_anon.[ext] + [nombre]_anon.[ext].key.json
+# Salida restauración:  [nombre]_restaurado.[ext]
 # =============================================================================
 
 import os
 import re
 import sys
+import json
 import argparse
-import spacy
-import pandas as pd
-from docx import Document
-from langdetect import detect, LangDetectException
-
-from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
-from presidio_analyzer.nlp_engine import NlpEngineProvider
+import datetime
 
 # =============================================================================
 # PARTE 0: Argumentos de línea de comandos
@@ -52,6 +54,8 @@ parser = argparse.ArgumentParser(
         "  python anonimizar.py C:/exports/ --ley rgpd\n"
         "  python anonimizar.py datos.csv --salida datos_limpio.csv --ley rgpd\n"
         "  python anonimizar.py C:/exports/ --carpeta-salida C:/anon/ --ley todo\n"
+        "  python anonimizar.py datos_anon.csv --restaurar\n"
+        "  python anonimizar.py datos_anon.csv --restaurar --mapa datos_anon.csv.key.json\n"
     )
 )
 parser.add_argument(
@@ -86,6 +90,20 @@ parser.add_argument(
     "--lista-leyes", action="store_true",
     help="Muestra las jurisdicciones disponibles y termina."
 )
+parser.add_argument(
+    "--restaurar", action="store_true",
+    help=(
+        "Modo restauración: reemplaza los tokens numerados por los valores originales.\n"
+        "Requiere el archivo .key.json generado durante la anonimización."
+    )
+)
+parser.add_argument(
+    "--mapa", metavar="ARCHIVO_KEY",
+    help=(
+        "Ruta explícita al archivo .key.json de mapa.\n"
+        "Por defecto se busca [archivo_anon].[ext].key.json en la misma carpeta."
+    )
+)
 args = parser.parse_args()
 
 if args.lista_leyes:
@@ -93,6 +111,141 @@ if args.lista_leyes:
     for ley in JURISDICCIONES_DISPONIBLES:
         print(f"  {ley}")
     sys.exit(0)
+
+# =============================================================================
+# PARTE 0b: Modo restauración — inicialización temprana (sin NLP)
+# =============================================================================
+# En modo restauración no se necesita spaCy ni Presidio.
+# Se importan solo los módulos de E/S de archivo.
+
+if args.restaurar:
+    import pandas as pd
+    from docx import Document
+
+    def restaurar_texto(texto: str, mapa: dict) -> str:
+        if not texto or not texto.strip():
+            return texto
+        # Ordenar por longitud descendente para evitar sustituciones parciales
+        for token, original in sorted(mapa.items(), key=lambda x: len(x[0]), reverse=True):
+            texto = texto.replace(token, original)
+        return texto
+
+    def cargar_mapa(ruta_mapa: str) -> dict:
+        with open(ruta_mapa, "r", encoding="utf-8") as f:
+            datos = json.load(f)
+        return datos["mapa"]
+
+    def ruta_mapa_para(ruta_entrada: str, mapa_explicito) -> str:
+        if mapa_explicito:
+            return mapa_explicito
+        base = os.path.abspath(ruta_entrada)
+        candidato = base + ".key.json"
+        if os.path.isfile(candidato):
+            return candidato
+        raise FileNotFoundError(
+            f"No se encontró el archivo de mapa para '{ruta_entrada}'.\n"
+            f"Buscado en: {candidato}\n"
+            f"Usa --mapa para indicar la ruta explícita."
+        )
+
+    def ruta_salida_restaurada_para(ruta_entrada: str) -> str:
+        if args.salida:
+            return args.salida
+        nombre_base, ext = os.path.splitext(os.path.basename(ruta_entrada))
+        nombre_restaurado = f"{nombre_base}_restaurado{ext}"
+        if args.carpeta_salida:
+            os.makedirs(args.carpeta_salida, exist_ok=True)
+            return os.path.join(args.carpeta_salida, nombre_restaurado)
+        return os.path.join(os.path.dirname(os.path.abspath(ruta_entrada)), nombre_restaurado)
+
+    def restaurar_csv(ruta_entrada: str, ruta_salida: str, mapa: dict):
+        df = pd.read_csv(ruta_entrada, dtype=str)
+        df = df.map(lambda c: restaurar_texto(c, mapa) if isinstance(c, str) else c)
+        df.to_csv(ruta_salida, index=False)
+        print(f"  CSV restaurado: {ruta_salida}")
+
+    def restaurar_xlsx(ruta_entrada: str, ruta_salida: str, mapa: dict):
+        hojas = pd.read_excel(ruta_entrada, sheet_name=None, dtype=str)
+        hojas_rest = {}
+        for nombre, df in hojas.items():
+            df = df.map(lambda c: restaurar_texto(c, mapa) if isinstance(c, str) else c)
+            hojas_rest[nombre] = df
+        with pd.ExcelWriter(ruta_salida, engine="openpyxl") as writer:
+            for nombre, df in hojas_rest.items():
+                df.to_excel(writer, sheet_name=nombre, index=False)
+        print(f"  XLSX restaurado: {ruta_salida}")
+
+    def restaurar_md(ruta_entrada: str, ruta_salida: str, mapa: dict):
+        with open(ruta_entrada, "r", encoding="utf-8") as f:
+            lineas = f.readlines()
+        lineas_rest = [restaurar_texto(l, mapa) for l in lineas]
+        with open(ruta_salida, "w", encoding="utf-8") as f:
+            f.writelines(lineas_rest)
+        print(f"  MD restaurado: {ruta_salida}")
+
+    def restaurar_docx(ruta_entrada: str, ruta_salida: str, mapa: dict):
+        doc = Document(ruta_entrada)
+        for parrafo in doc.paragraphs:
+            for run in parrafo.runs:
+                run.text = restaurar_texto(run.text, mapa)
+        for tabla in doc.tables:
+            for fila in tabla.rows:
+                for celda in fila.cells:
+                    for parrafo in celda.paragraphs:
+                        for run in parrafo.runs:
+                            run.text = restaurar_texto(run.text, mapa)
+        doc.save(ruta_salida)
+        print(f"  DOCX restaurado: {ruta_salida}")
+
+    RESTAURADORES = {
+        ".csv":  restaurar_csv,
+        ".xlsx": restaurar_xlsx,
+        ".md":   restaurar_md,
+        ".docx": restaurar_docx,
+    }
+
+    if not args.entradas:
+        parser.print_help()
+        sys.exit(0)
+
+    if args.salida and len(args.entradas) > 1:
+        print("[ERROR] --salida solo es válido con un único archivo de entrada.")
+        sys.exit(1)
+
+    print("Modo: RESTAURACIÓN\n")
+    for ruta_entrada in args.entradas:
+        ruta_entrada = os.path.abspath(ruta_entrada)
+        if not os.path.isfile(ruta_entrada):
+            print(f"  [AVISO] No encontrado: {ruta_entrada}")
+            continue
+        _, extension = os.path.splitext(ruta_entrada)
+        extension = extension.lower()
+        if extension not in RESTAURADORES:
+            print(f"  [OMITIDO] {ruta_entrada} (extensión no soportada)")
+            continue
+        print(f"Restaurando: {ruta_entrada}")
+        try:
+            ruta_mapa = ruta_mapa_para(ruta_entrada, args.mapa)
+            mapa = cargar_mapa(ruta_mapa)
+            print(f"  Mapa cargado: {ruta_mapa} ({len(mapa)} tokens)")
+            ruta_salida = ruta_salida_restaurada_para(ruta_entrada)
+            RESTAURADORES[extension](ruta_entrada, ruta_salida, mapa)
+        except Exception as e:
+            print(f"  [ERROR] {e}")
+
+    sys.exit(0)
+
+# =============================================================================
+# PARTE 1: Modelos de lenguaje — spaCy multilingüe
+# =============================================================================
+
+import spacy
+import pandas as pd
+from docx import Document
+from langdetect import detect, LangDetectException
+
+from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
+from presidio_analyzer.nlp_engine import NlpEngineProvider
 
 leyes_activas = set(JURISDICCIONES_DISPONIBLES if "todo" in args.ley else args.ley)
 leyes_invalidas = leyes_activas - set(JURISDICCIONES_DISPONIBLES)
@@ -103,20 +256,14 @@ if leyes_invalidas:
 
 print(f"Jurisdicciones activas: {', '.join(sorted(leyes_activas))}\n")
 
-# =============================================================================
-# PARTE 1: Modelos de lenguaje — spaCy multilingüe
-# =============================================================================
-# Los modelos se cargan de forma gradual. Cualquier combinación funciona siempre
-# que haya al menos uno instalado.
-
 MODELOS_IDIOMA = {
-    "es": "es_core_news_lg",  # español
-    "en": "en_core_web_lg",   # inglés
-    "fr": "fr_core_news_lg",  # francés
-    "de": "de_core_news_lg",  # alemán
-    "it": "it_core_news_lg",  # italiano
-    "pt": "pt_core_news_lg",  # portugués (cubre LGPD Brasil)
-    "nl": "nl_core_news_lg",  # neerlandés
+    "es": "es_core_news_lg",
+    "en": "en_core_web_lg",
+    "fr": "fr_core_news_lg",
+    "de": "de_core_news_lg",
+    "it": "it_core_news_lg",
+    "pt": "pt_core_news_lg",
+    "nl": "nl_core_news_lg",
 }
 
 print("Comprobando modelos de idioma disponibles:")
@@ -155,38 +302,28 @@ print(f"\nMotor listo. Idiomas activos: {', '.join(idiomas_disponibles)}\n")
 # =============================================================================
 # PARTE 2: Mapa de etiquetas y entidades universales
 # =============================================================================
-# Las etiquetas con prefijo de jurisdicción facilitan la trazabilidad en auditorías.
 
 ETIQUETAS = {
-    # Entidades universales (todas las jurisdicciones)
-    "PERSON":          "<PERSONA>",
-    "EMAIL_ADDRESS":   "<EMAIL>",
-    "PHONE_NUMBER":    "<TELEFONO>",
-    "IBAN_CODE":       "<IBAN>",
-    "CREDIT_CARD":     "<TARJETA>",
-    "DATE_TIME":       "<FECHA>",
-    "IP_ADDRESS":      "<IP>",
-    "LOCATION":        "<UBICACION>",
-    # España / RGPD
-    "DNI_NIE":         "<DNI-ES>",
-    # Chile — Ley 21.719
-    "RUT_CL":          "<RUT-CL>",
-    # Brasil — LGPD
-    "CPF_BR":          "<CPF-BR>",
-    "CNPJ_BR":         "<CNPJ-BR>",
-    # México — LFPDPPP
-    "CURP_MX":         "<CURP-MX>",
-    "RFC_MX":          "<RFC-MX>",
-    # Colombia — Ley 1581
-    "NIT_CO":          "<NIT-CO>",
-    # Argentina — Ley 25.326
-    "CUIT_AR":         "<CUIT-AR>",
-    "DNI_AR":          "<DNI-AR>",
-    # UK — UK GDPR / DPA 2018
-    "NINO_UK":         "<NINO-UK>",
-    # EE.UU. — CCPA/CPRA
-    "SSN_US":          "<SSN-US>",
-    "DL_US":           "<DL-US>",
+    "PERSON":          "PERSONA",
+    "EMAIL_ADDRESS":   "EMAIL",
+    "PHONE_NUMBER":    "TELEFONO",
+    "IBAN_CODE":       "IBAN",
+    "CREDIT_CARD":     "TARJETA",
+    "DATE_TIME":       "FECHA",
+    "IP_ADDRESS":      "IP",
+    "LOCATION":        "UBICACION",
+    "DNI_NIE":         "DNI-ES",
+    "RUT_CL":          "RUT-CL",
+    "CPF_BR":          "CPF-BR",
+    "CNPJ_BR":         "CNPJ-BR",
+    "CURP_MX":         "CURP-MX",
+    "RFC_MX":          "RFC-MX",
+    "NIT_CO":          "NIT-CO",
+    "CUIT_AR":         "CUIT-AR",
+    "DNI_AR":          "DNI-AR",
+    "NINO_UK":         "NINO-UK",
+    "SSN_US":          "SSN-US",
+    "DL_US":           "DL-US",
 }
 
 ENTIDADES_BASE = [
@@ -206,21 +343,18 @@ FALSOS_POSITIVOS_PERSONA = {
 # PARTE 3: Reconocedores por jurisdicción
 # =============================================================================
 
-def _para_todos(name_prefix, patterns, entity):
-    """Registra un PatternRecognizer con la entidad dada en todos los idiomas."""
+def _registrar_para_todos(name_prefix, entity, patterns):
     for lang in idiomas_disponibles:
+        name = f"{name_prefix}_{lang}" if name_prefix else f"{entity}_{lang}"
         analyzer.registry.add_recognizer(PatternRecognizer(
-            name=f"{name_prefix}_{lang}",
+            name=name,
             patterns=patterns,
             supported_language=lang,
             supported_entity=entity,
         ))
 
 
-# ── RGPD (España / UE) ────────────────────────────────────────────────────────
-
 def activar_rgpd():
-    # DNI / NIE españoles
     analyzer.registry.add_recognizer(PatternRecognizer(
         name="DNI_NIE_ES",
         patterns=[
@@ -230,63 +364,29 @@ def activar_rgpd():
         supported_language="es",
         supported_entity="DNI_NIE",
     ))
-    # Teléfonos españoles + internacionales
     patrones_tel_es = [
         Pattern("Tel_ES_intl",  r"(?<!\d)(?:\+34|0034)[\s.\-]?[6-9]\d{2}[\s.\-]?\d{3}[\s.\-]?\d{3}\b", 0.95),
         Pattern("Movil_ES",     r"\b[67]\d{2}[\s.\-]?\d{3}[\s.\-]?\d{3}\b", 0.80),
         Pattern("Fijo_ES",      r"\b9\d{2}[\s.\-]?\d{3}[\s.\-]?\d{3}\b", 0.75),
         Pattern("Tel_intl_gen", r"(?<!\d)\+(?!34|0034)\d{1,3}[\s.\-]?\(?\d{1,4}\)?[\s.\-]?\d{2,4}[\s.\-]?\d{2,4}[\s.\-]?\d{0,4}\b", 0.85),
     ]
-    _registrar_para_todos(None, "Telefono_ES", patrones_tel_es)
+    _registrar_para_todos(None, "PHONE_NUMBER", patrones_tel_es)
     print("  [RGPD] Reconocedores DNI/NIE + teléfonos ES activados.")
 
 
-# ── Chile — Ley 21.719 ────────────────────────────────────────────────────────
-# RUT/RUN: hasta 8 dígitos + guion + dígito verificador (0-9 o K/k).
-# Formato habitual: 12.345.678-9 o 12345678-9. También sin puntos: 12345678K.
-# La Ley 21.719 fue publicada el 13 de diciembre de 2024 y entra en vigencia
-# el 1 de diciembre de 2026. Sustituye íntegramente la Ley 19.628 de 1999.
-# Crea la APDP (Agencia de Protección de Datos Personales) como autoridad
-# autónoma. Amplía datos sensibles (biométricos, geolocalización continua,
-# datos de menores) e introduce sanciones de hasta 20.000 UTM.
-# El RUT sigue siendo el identificador nacional único.
-
 def activar_chile():
     patrones_rut = [
-        Pattern("RUT_puntos",   r"\b\d{1,2}\.\d{3}\.\d{3}-[\dKk]\b", 0.95),
-        Pattern("RUT_sin_pts",  r"\b\d{7,8}-[\dKk]\b",               0.85),
+        Pattern("RUT_puntos",  r"\b\d{1,2}\.\d{3}\.\d{3}-[\dKk]\b", 0.95),
+        Pattern("RUT_sin_pts", r"\b\d{7,8}-[\dKk]\b",               0.85),
     ]
-    _registrar_para_todos(None, "RUT_CL", [
-        Pattern("RUT_CL", p.regex, p.score) for p in patrones_rut
-    ])
-    # Sobrescribir entity: los patterns anteriores necesitan entity=RUT_CL
-    for lang in idiomas_disponibles:
-        analyzer.registry.add_recognizer(PatternRecognizer(
-            name=f"RUT_CL_{lang}",
-            patterns=patrones_rut,
-            supported_language=lang,
-            supported_entity="RUT_CL",
-        ))
-    # Teléfonos chilenos
+    _registrar_para_todos(None, "RUT_CL", patrones_rut)
     patrones_tel_cl = [
         Pattern("Tel_CL_movil", r"(?:\+56|0056)?[\s\-]?9[\s\-]?\d{4}[\s\-]?\d{4}\b", 0.90),
         Pattern("Tel_CL_fijo",  r"(?:\+56|0056)[\s\-]?[2-9]\d{7}\b", 0.85),
     ]
-    _registrar_para_todos(None, "Telefono_CL_tmp", patrones_tel_cl)
-    for lang in idiomas_disponibles:
-        analyzer.registry.add_recognizer(PatternRecognizer(
-            name=f"Telefono_CL_{lang}",
-            patterns=patrones_tel_cl,
-            supported_language=lang,
-            supported_entity="PHONE_NUMBER",
-        ))
+    _registrar_para_todos(None, "PHONE_NUMBER", patrones_tel_cl)
     print("  [Chile — Ley 21.719] Reconocedores RUT/RUN + teléfonos CL activados.")
 
-
-# ── Brasil — LGPD ─────────────────────────────────────────────────────────────
-# CPF: XXX.XXX.XXX-XX (persona física). CNPJ: XX.XXX.XXX/XXXX-XX (persona jurídica).
-# La LGPD (Lei 13.709/2018) entró en vigor en agosto 2020. Exige base legal para
-# tratamiento, aplica a datos de brasileños independientemente de dónde se procesen.
 
 def activar_brasil():
     patrones_cpf = [
@@ -306,7 +406,6 @@ def activar_brasil():
             name=f"CNPJ_BR_{lang}", patterns=patrones_cnpj,
             supported_language=lang, supported_entity="CNPJ_BR",
         ))
-        # Teléfonos brasileños
         analyzer.registry.add_recognizer(PatternRecognizer(
             name=f"Telefono_BR_{lang}",
             patterns=[
@@ -318,16 +417,6 @@ def activar_brasil():
     print("  [Brasil — LGPD] Reconocedores CPF, CNPJ + teléfonos BR activados.")
 
 
-# ── México — LFPDPPP 2010/2025 ────────────────────────────────────────────────
-# CURP: identificador de 18 caracteres alfanuméricos (persona física).
-# RFC: identificador fiscal. Persona física: 13 chars. Persona moral: 12 chars.
-# La LFPDPPP original data de 2010. Una reforma constitucional de noviembre 2024
-# eliminó el INAI (autoridad de control). La ley reformada entró en vigor el
-# 21 de marzo de 2025; la nueva autoridad de control es la SABG (Secretaría
-# Anticorrupción y Buen Gobierno). Incorpora obligaciones sobre decisiones
-# automatizadas e inteligencia artificial.
-# Para sector público: Ley General de Protección de Datos (2017).
-
 def activar_mexico():
     patrones_curp = [
         Pattern("CURP_MX",
@@ -335,12 +424,8 @@ def activar_mexico():
             0.92),
     ]
     patrones_rfc = [
-        Pattern("RFC_fisica",
-            r"\b[A-Z&Ñ]{4}\d{6}[A-Z0-9]{3}\b",
-            0.85),
-        Pattern("RFC_moral",
-            r"\b[A-Z&Ñ]{3}\d{6}[A-Z0-9]{3}\b",
-            0.80),
+        Pattern("RFC_fisica", r"\b[A-Z&Ñ]{4}\d{6}[A-Z0-9]{3}\b", 0.85),
+        Pattern("RFC_moral",  r"\b[A-Z&Ñ]{3}\d{6}[A-Z0-9]{3}\b", 0.80),
     ]
     for lang in idiomas_disponibles:
         analyzer.registry.add_recognizer(PatternRecognizer(
@@ -351,7 +436,6 @@ def activar_mexico():
             name=f"RFC_MX_{lang}", patterns=patrones_rfc,
             supported_language=lang, supported_entity="RFC_MX",
         ))
-        # Teléfonos mexicanos
         analyzer.registry.add_recognizer(PatternRecognizer(
             name=f"Telefono_MX_{lang}",
             patterns=[
@@ -364,17 +448,10 @@ def activar_mexico():
     print("  [México — LFPDPPP] Reconocedores CURP, RFC + teléfonos MX activados.")
 
 
-# ── Colombia — Ley 1581/2012 ──────────────────────────────────────────────────
-# NIT: identificador tributario de 9 dígitos + dígito de verificación (XX-X).
-# Cédula de ciudadanía (CC): 6-10 dígitos. Alta tasa de falsos positivos si
-# no hay contexto; se activa solo cuando va precedida de abreviaturas comunes.
-# La Ley 1581 y su Decreto reglamentario 1377/2013 regulan la protección de datos.
-
 def activar_colombia():
     patrones_nit = [
         Pattern("NIT_CO", r"\b\d{9}-\d\b", 0.90),
     ]
-    # Cédula con contexto previo (cc., c.c., cédula, documento)
     patrones_cc = [
         Pattern("CC_CO_contexto",
             r"(?:C\.?C\.?|cédula|documento)\s*:?\s*(\d{6,10})\b",
@@ -389,7 +466,6 @@ def activar_colombia():
             name=f"CC_CO_{lang}", patterns=patrones_cc,
             supported_language=lang, supported_entity="DNI_NIE",
         ))
-        # Teléfonos colombianos
         analyzer.registry.add_recognizer(PatternRecognizer(
             name=f"Telefono_CO_{lang}",
             patterns=[
@@ -400,11 +476,6 @@ def activar_colombia():
         ))
     print("  [Colombia — Ley 1581] Reconocedores NIT, CC + teléfonos CO activados.")
 
-
-# ── Argentina — Ley 25.326 ────────────────────────────────────────────────────
-# DNI argentino: 7-8 dígitos, habitualmente con puntos: XX.XXX.XXX.
-# CUIT/CUIL: 11 dígitos con guiones: XX-XXXXXXXX-X.
-# La Ley 25.326 (2000) sigue vigente; el proyecto PIDIA de reforma aún no fue aprobado.
 
 def activar_argentina():
     patrones_dni_ar = [
@@ -423,7 +494,6 @@ def activar_argentina():
             name=f"CUIT_AR_{lang}", patterns=patrones_cuit,
             supported_language=lang, supported_entity="CUIT_AR",
         ))
-        # Teléfonos argentinos
         analyzer.registry.add_recognizer(PatternRecognizer(
             name=f"Telefono_AR_{lang}",
             patterns=[
@@ -435,16 +505,6 @@ def activar_argentina():
         ))
     print("  [Argentina — Ley 25.326] Reconocedores DNI, CUIT/CUIL + teléfonos AR activados.")
 
-
-# ── UK — UK GDPR / DPA 2018 / DUAA 2025 ──────────────────────────────────────
-# National Insurance Number (NINO): formato AA 99 99 99 A (7 chars sin espacios: AA999999A).
-# El marco legal UK consta de tres instrumentos: UK GDPR (en vigor 1 enero 2021),
-# Data Protection Act 2018, y Data (Use and Access) Act 2025 (Royal Assent
-# 19/06/2025, disposiciones principales en vigor 5 febrero 2026).
-# La DUAA 2025 introduce divergencias materiales respecto al RGPD de la UE:
-# exención de cookies analíticas de consentimiento, recognized legitimate interests
-# sin test de balance, y mecanismo stop-the-clock en solicitudes de acceso.
-# La Comisión Europea renovó la decisión de adecuación del UK hasta diciembre 2031.
 
 def activar_uk():
     patrones_nino = [
@@ -468,16 +528,6 @@ def activar_uk():
         ))
     print("  [UK — UK GDPR/DPA 2018] Reconocedores NINO + teléfonos UK activados.")
 
-
-# ── CCPA / CPRA — California ──────────────────────────────────────────────────
-# Social Security Number (SSN): XXX-XX-XXXX.
-# California Driver's License: letra + 7 dígitos.
-# La CCPA (2018) y su extensión CPRA (2020, vigente enero 2023) aplican a empresas
-# con >$25M de facturación, ≥100.000 consumidores o ≥50% ingresos de datos.
-# Regulaciones adicionales aprobadas por la CPPA en septiembre 2025, en vigor
-# desde el 1 de enero de 2026: datos neurales incorporados como datos sensibles,
-# datos de menores <16 clasificados automáticamente como sensibles, obligación
-# de honrar señales GPC (Global Privacy Control) como opt-out válido.
 
 def activar_ccpa():
     patrones_ssn = [
@@ -526,7 +576,6 @@ print("Activando reconocedores:")
 for ley in sorted(leyes_activas):
     ACTIVADORES[ley]()
 
-# Construir lista de entidades activas a partir de las etiquetas registradas
 ENTIDADES = ENTIDADES_BASE + [
     e for e in ETIQUETAS
     if e not in ENTIDADES_BASE and any(
@@ -546,12 +595,56 @@ COLUMNAS_TEXTO_SF = {
     "meta keywords 1", "snippet",
 }
 
-def es_archivo_screaming_frog(df: pd.DataFrame) -> bool:
+def es_archivo_screaming_frog(df) -> bool:
     cabeceras = {c.lower() for c in df.columns}
     return {"address", "content type", "status code"}.issubset(cabeceras)
 
 # =============================================================================
-# PARTE 6: Función principal de anonimización de texto
+# PARTE 6: Mapa de anonimización — estado por archivo
+# =============================================================================
+# Tokens numerados por tipo: <PERSONA-1>, <PERSONA-2>, <EMAIL-1>, <DNI-ES-1>, etc.
+# El mismo valor original siempre recibe el mismo token dentro del archivo.
+# El mapa se guarda en [archivo_anon].key.json como JSON legible.
+
+_mapa_token_a_original: dict = {}
+_mapa_original_a_token: dict = {}
+_contadores_tipo: dict = {}
+
+
+def _reset_mapa():
+    _mapa_token_a_original.clear()
+    _mapa_original_a_token.clear()
+    _contadores_tipo.clear()
+
+
+def _token_para(entidad_tipo: str, valor_original: str) -> str:
+    if valor_original in _mapa_original_a_token:
+        return _mapa_original_a_token[valor_original]
+    prefijo = ETIQUETAS.get(entidad_tipo, entidad_tipo)
+    n = _contadores_tipo.get(prefijo, 0) + 1
+    _contadores_tipo[prefijo] = n
+    token = f"<{prefijo}-{n}>"
+    _mapa_original_a_token[valor_original] = token
+    _mapa_token_a_original[token] = valor_original
+    return token
+
+
+def _guardar_mapa(ruta_anon: str, archivo_origen: str):
+    ruta_mapa = ruta_anon + ".key.json"
+    datos = {
+        "version": "2.2",
+        "ley": sorted(leyes_activas),
+        "fecha": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "archivo_origen": os.path.basename(archivo_origen),
+        "advertencia": "Este archivo contiene datos personales originales. Trátalo con el mismo nivel de protección que el archivo fuente.",
+        "mapa": _mapa_token_a_original.copy(),
+    }
+    with open(ruta_mapa, "w", encoding="utf-8") as f:
+        json.dump(datos, f, ensure_ascii=False, indent=2)
+    print(f"  Mapa guardado: {ruta_mapa} ({len(_mapa_token_a_original)} tokens)")
+
+# =============================================================================
+# PARTE 7: Función principal de anonimización de texto
 # =============================================================================
 
 def _detectar_idioma(texto: str) -> str:
@@ -585,7 +678,6 @@ def anonimizar_texto(texto: str) -> str:
         language=idioma
     )
 
-    # Descartar falsos positivos de PERSON
     resultados = [
         r for r in resultados
         if not (
@@ -594,7 +686,6 @@ def anonimizar_texto(texto: str) -> str:
         )
     ]
 
-    # LOCATION solo si aparece cerca de una PERSON (≤120 caracteres)
     personas = [r for r in resultados if r.entity_type == "PERSON"]
     resultados = [
         r for r in resultados
@@ -604,12 +695,10 @@ def anonimizar_texto(texto: str) -> str:
         )
     ]
 
-    # EMAIL_ADDRESS tiene prioridad sobre URL cuando se solapan
     for r in resultados:
         if r.entity_type == "EMAIL_ADDRESS":
             r.score = 1.0
 
-    # Eliminar solapamientos: conservar la entidad con mayor score
     resultados_sin_solapamiento = []
     for r in sorted(resultados, key=lambda x: x.score, reverse=True):
         solapado = any(
@@ -623,13 +712,14 @@ def anonimizar_texto(texto: str) -> str:
 
     texto_anon = texto
     for resultado in resultados:
-        etiqueta = ETIQUETAS.get(resultado.entity_type, f"<{resultado.entity_type}>")
-        texto_anon = texto_anon[:resultado.start] + etiqueta + texto_anon[resultado.end:]
+        valor_original = texto[resultado.start:resultado.end]
+        token = _token_para(resultado.entity_type, valor_original)
+        texto_anon = texto_anon[:resultado.start] + token + texto_anon[resultado.end:]
 
     return texto_anon
 
 # =============================================================================
-# PARTE 7: Procesadores por formato de archivo
+# PARTE 8: Procesadores por formato de archivo
 # =============================================================================
 
 def procesar_csv(ruta_entrada: str, ruta_salida: str):
@@ -683,7 +773,7 @@ def procesar_docx(ruta_entrada: str, ruta_salida: str):
     print(f"  DOCX guardado: {ruta_salida}")
 
 # =============================================================================
-# PARTE 8: Resolución de rutas y bucle principal
+# PARTE 9: Resolución de rutas y bucle principal
 # =============================================================================
 
 PROCESADORES = {
@@ -695,13 +785,6 @@ PROCESADORES = {
 
 
 def ruta_salida_para(ruta_entrada: str) -> str:
-    """
-    Calcula la ruta de salida para un archivo dado.
-    Orden de prioridad:
-      1. --salida  (solo con un único archivo)
-      2. --carpeta-salida / nombre_anon.ext
-      3. misma carpeta que el original / nombre_anon.ext
-    """
     if args.salida:
         return args.salida
     nombre, ext = os.path.splitext(os.path.basename(ruta_entrada))
@@ -713,10 +796,6 @@ def ruta_salida_para(ruta_entrada: str) -> str:
 
 
 def recopilar_archivos(entradas: list) -> list:
-    """
-    Expande la lista de argumentos (archivos y/o carpetas) en rutas absolutas
-    de archivos con extensión soportada.
-    """
     rutas = []
     for entrada in entradas:
         entrada = os.path.abspath(entrada)
@@ -732,8 +811,6 @@ def recopilar_archivos(entradas: list) -> list:
     return rutas
 
 
-# ── Validaciones previas ──────────────────────────────────────────────────────
-
 if not args.entradas:
     parser.print_help()
     sys.exit(0)
@@ -748,8 +825,6 @@ if not archivos:
     print("No se encontraron archivos para procesar.")
     sys.exit(0)
 
-# ── Procesado ─────────────────────────────────────────────────────────────────
-
 print(f"Archivos a procesar: {len(archivos)}\n")
 for ruta_entrada in archivos:
     _, extension = os.path.splitext(ruta_entrada)
@@ -759,9 +834,9 @@ for ruta_entrada in archivos:
         continue
     ruta_salida = ruta_salida_para(ruta_entrada)
     print(f"Procesando: {ruta_entrada}")
+    _reset_mapa()
     try:
         PROCESADORES[extension](ruta_entrada, ruta_salida)
+        _guardar_mapa(ruta_salida, ruta_entrada)
     except Exception as e:
         print(f"  [ERROR] {e}")
-
-print("\nAnonimización completada.")
