@@ -1,17 +1,36 @@
 # Multi-Jurisdiction PII Anonymizer
 
-A Python tool for detecting and replacing personally identifiable information (PII)
-in CSV, XLSX, Markdown, and DOCX files — with jurisdiction-specific rules for 8
-data protection frameworks.
+**Use AI on client data without the data ever touching the AI.**
 
-Built for SEO agencies, data analysts, and consultants who share client data with
-AI tools and need a clean, auditable anonymization step before exporting files.
+Anonymize CSV, Excel, Word and Markdown files locally — names, national IDs,
+emails, phones, addresses — replacing them with neutral tokens before anything
+leaves your machine. Hand the tokenized file to ChatGPT or Claude, work as usual,
+then restore the real values with one command. Nothing is sent to the cloud.
+
+Three steps:
+
+```
+1. anonymize        →  informe.docx        →  informe_anon.docx (+ key map)
+2. process with AI  →  informe_anon.docx   →  result.docx        (AI sees only tokens)
+3. restore          →  result.docx         →  result_restaurado.docx (real data back)
+```
+
+Zero config: by default it protects under GDPR and 7 other frameworks at once.
+It restores the file even if the AI hands it back under a different name. And it
+ships with a safety net — optional map encryption, coverage reports after every
+run (what was detected, what could not be restored), and a regression test suite
+so each update keeps protecting your data.
+
+You get the full power of AI. Your sensitive data never sees it.
 
 - **Jurisdictions**: RGPD/GDPR (EU), Ley 21.719 (Chile), LGPD (Brazil), LFPDPPP (Mexico), Ley 1581 (Colombia), Ley 25.326 (Argentina), UK GDPR, CCPA/CPRA (California)
 - **Formats**: `.csv`, `.xlsx`, `.md`, `.docx`
 - **NLP engine**: [spaCy](https://spacy.io/) + [Microsoft Presidio](https://microsoft.github.io/presidio/), multilingual, runs entirely local — no data leaves the machine
+- **Reversible**: every run produces a `.key.json` map for full restoration; optional AES encryption
 - **Screaming Frog aware**: auto-detects SF exports and only processes free-text columns
-- **Reversible**: every anonymization run produces a `.key.json` map for full restoration
+
+Built for SEO agencies, data analysts, and consultants who share client data with
+AI tools and need a clean, auditable anonymization step before exporting files.
 
 ---
 
