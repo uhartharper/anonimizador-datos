@@ -87,7 +87,7 @@ Leer el texto del usuario buscando menciones de jurisdicción:
 Script: `anonimizar.py`. Ubicación de referencia:
 `D:\OneDrive\Escritorio\Yo\Papitas SEO\anonimizador_rgpd\anonimizar.py`.
 Si no está ahí, localizarlo (`anonimizar.py` en el proyecto) o clonar
-`github.com/uhartharper/anonimizador-datos`. Ejecutar desde su carpeta con `py`/`python`.
+`github.com/carlosuhart/anonimizador-datos`. Ejecutar desde su carpeta con `py`/`python`.
 
 ### Anonimización
 
@@ -199,6 +199,24 @@ Numerados por tipo, reutilizados si el mismo valor aparece varias veces:
 
 `<PERSONA-1>` `<EMAIL-1>` `<TELEFONO-1>` `<DIRECCION-1>` `<DNI-ES-1>` `<RUT-CL-1>`
 `<CPF-BR-1>` `<CURP-MX-1>` `<NIT-CO-1>` `<CUIT-AR-1>` `<NINO-UK-1>` `<SSN-US-1>`
+
+---
+
+## Integración con ley-datos-chile
+
+Los reportes generados por `/ley-datos-chile` pueden contener PII del cliente auditado
+(nombre, email, RUT del responsable del tratamiento, dirección del EPD, etc.).
+Antes de compartir un reporte de auditoría con terceros o almacenarlo en repositorios
+compartidos, anonimizarlo con:
+
+```
+/anonimizar C:/Users/cmano/claude-seo/[cliente]/auditoria_ley21719_[fecha].md --ley chile
+/anonimizar C:/Users/cmano/claude-seo/[cliente]/auditoria_ley21719_[fecha].docx --ley chile
+```
+
+El token `<RUT-CL-1>` cubre RUTs de empresa y persona natural.
+Usar `--ley chile` en lugar de `--ley todo` para minimizar falsos positivos
+en los números de artículos legales (Art. 12, Art. 26, etc.).
 
 ---
 
