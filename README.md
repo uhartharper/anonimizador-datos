@@ -292,7 +292,7 @@ The same original value always maps to the same token within a file.
 ### 1. Clone the repository
 
 ```bash
-git clone --depth 1 https://github.com/uhartharper/anonimizador-datos.git
+git clone --depth 1 https://github.com/carlosuhart/anonimizador-datos.git
 cd anonimizador-datos
 ```
 
